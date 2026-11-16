@@ -1,0 +1,62 @@
+rules_version = '2';
+
+// Regras do Cloud Firestore da lista de compras em família.
+// Cole no console do Firebase (Firestore › Regras) ou publique com: firebase deploy --only firestore:rules
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function logado() {
+      return request.auth != null;
+    }
+
+    function familia(fid) {
+      return /databases/$(db)/documents/familias/$(fid);
+    }
+
+    function membro(fid) {
+      return logado() && request.auth.uid in get(familia(fid)).data.membros;
+    }
+
+    match /familias/{fid} {
+      allow read: if logado() && request.auth.uid in resource.data.membros;
+
+      // Quem cria é o dono e o único membro.
+      allow create: if logado()
+        && request.resource.data.dono == request.auth.uid
+        && request.resource.data.membros == [request.auth.uid];
+
+      allow update: if logado() && (
+        // Membro: muda o nome, sai da família etc. Não troca o dono nem o código.
+        (request.auth.uid in resource.data.membros
+          && request.resource.data.dono == resource.data.dono
+          && request.resource.data.codigo == resource.data.codigo)
+        ||
+        // Quem ainda não é membro só pode se incluir, com um convite desta família.
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['membros', 'nomes', 'entrouCom'])
+          && request.resource.data.membros.toSet() == resource.data.membros.toSet().union([request.auth.uid].toSet())
+          && request.resource.data.nomes.diff(resource.data.nomes).affectedKeys().hasOnly([request.auth.uid])
+          && get(/databases/$(db)/documents/convites/$(request.resource.data.entrouCom)).data.familiaId == fid)
+      );
+
+      allow delete: if logado() && resource.data.dono == request.auth.uid;
+
+      // itens, precos, conhecidos: só os membros.
+      match /{colecao}/{doc} {
+        allow read, write: if membro(fid);
+      }
+    }
+
+    match /convites/{codigo} {
+      // Quem tem o código pode ler o convite (é assim que entra). Códigos têm 8 caracteres aleatórios.
+      allow get: if logado();
+      // Listar: só os convites para o próprio e-mail.
+      allow list: if logado() && resource.data.email == request.auth.token.email;
+      // getAfter: a família pode estar sendo criada no mesmo lote.
+      allow create: if logado()
+        && request.resource.data.criadoPor == request.auth.uid
+        && request.auth.uid in getAfter(familia(request.resource.data.familiaId)).data.membros;
+      allow delete: if logado()
+        && (resource.data.criadoPor == request.auth.uid || resource.data.email == request.auth.token.email);
+    }
+  }
+}
